@@ -1,0 +1,91 @@
+name: CI/CD Nginx Demo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: nginx-ci-demo
+
+jobs:
+  # ----- NIVEAU 1 & 2 : Build + Tests -----
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # Niveau 1 & 2 : présence des fichiers essentiels
+      - name: Vérifier la présence des fichiers
+        run: |
+          for f in Dockerfile default.conf index.html; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Fichier manquant : $f"
+              exit 1
+            fi
+          done
+          echo "Tous les fichiers essentiels sont présents."
+
+      - name: Build de l'image Docker
+        run: docker build -t $IMAGE_NAME .
+
+      # Niveau 1 : tester la configuration Nginx
+      - name: Tester la configuration Nginx
+        run: docker run --rm $IMAGE_NAME nginx -t
+
+      - name: Lancer le conteneur
+        run: docker run -d --name nginx-test -p 8080:80 $IMAGE_NAME
+
+      - name: Attendre le démarrage
+        run: sleep 3
+
+      # Niveau 2 : le service répond en HTTP
+      - name: Tester la réponse HTTP (/)
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+          echo "Code HTTP / = $code"
+          [ "$code" = "200" ] || { echo "::error::/ ne répond pas 200"; exit 1; }
+
+      # Niveau 2 : endpoint /health
+      - name: Tester l'endpoint /health
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+          echo "Code HTTP /health = $code"
+          [ "$code" = "200" ] || { echo "::error::/health ne répond pas 200"; exit 1; }
+
+      - name: Nettoyage
+        if: always()
+        run: docker rm -f nginx-test || true
+
+  # ----- NIVEAU 3 : Publication GHCR + validation manuelle -----
+  publish:
+    needs: build-test
+    runs-on: ubuntu-latest
+    # Ne publie que sur push vers main (pas sur les PR)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Validation manuelle : crée un environnement "production" protégé
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Connexion à GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build et push (tag SHA + latest)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
